@@ -1,0 +1,5 @@
+<resources>
+    <string name="app_name">Device Status Share</string>
+    <string name="join_group">Join group</string>
+    <string name="create_group">Create group</string>
+</resources>
