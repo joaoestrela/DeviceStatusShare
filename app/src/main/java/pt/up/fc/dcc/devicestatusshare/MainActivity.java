@@ -4,7 +4,6 @@ import android.Manifest;
 import android.app.Activity;
 import android.app.Dialog;
 import android.content.Context;
-import android.content.DialogInterface;
 import android.content.Intent;
 import android.content.IntentFilter;
 import android.content.pm.PackageManager;
@@ -35,17 +34,21 @@ import org.json.JSONException;
 import org.json.JSONObject;
 
 import java.io.IOException;
-import java.io.UnsupportedEncodingException;
 import java.net.DatagramPacket;
 import java.net.DatagramSocket;
 import java.net.InetAddress;
+import java.nio.ByteBuffer;
 import java.security.NoSuchAlgorithmException;
+import java.security.SecureRandom;
+import java.util.Arrays;
 import java.util.Timer;
 import java.util.TimerTask;
 
 import javax.crypto.Cipher;
 import javax.crypto.KeyGenerator;
+import javax.crypto.Mac;
 import javax.crypto.SecretKey;
+import javax.crypto.spec.IvParameterSpec;
 import javax.crypto.spec.SecretKeySpec;
 
 import androidx.appcompat.app.AppCompatActivity;
@@ -54,7 +57,8 @@ import androidx.core.app.ActivityCompat;
 public class MainActivity extends AppCompatActivity {
 
     private Activity thisActivity = this;
-
+    static SecureRandom secureRandom = new SecureRandom();
+    static byte[] encrypt_iv = new byte[16];
     private static String groupName;
     private static String groupKey;
     private static SecretKey secretKey;
@@ -63,7 +67,7 @@ public class MainActivity extends AppCompatActivity {
 
     private MyDatagramReceiver myDatagramReceiver = null;
     private static final int UDP_SERVER_PORT = 2562;
-    private static final int MAX_UDP_DATAGRAM_LEN = 64;
+    private static final int MAX_UDP_DATAGRAM_LEN = 512;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -121,14 +125,7 @@ public class MainActivity extends AppCompatActivity {
                 builder.requestWindowFeature(Window.FEATURE_NO_TITLE);
                 builder.getWindow().setBackgroundDrawable(
                         new ColorDrawable(android.graphics.Color.TRANSPARENT));
-                builder.setOnDismissListener(new DialogInterface.OnDismissListener() {
-                    @Override
-                    public void onDismiss(DialogInterface dialogInterface) {
-                        //nothing;
-                    }
-                });
-
-                ImageView imageView = new ImageView(thisActivity);
+                                ImageView imageView = new ImageView(thisActivity);
                 imageView.setImageBitmap(bitmap);
                 builder.addContentView(imageView, new RelativeLayout.LayoutParams(
                         ViewGroup.LayoutParams.MATCH_PARENT,
@@ -159,14 +156,22 @@ public class MainActivity extends AppCompatActivity {
             } catch (JSONException e) {
                 e.printStackTrace();
             }
-            byte [] a = new byte[0];
             try {
-                a = sendMessage.toString().getBytes("UTF-8");
-            } catch (UnsupportedEncodingException e) {
-                e.printStackTrace();
-            }
-            try {
-                broadcastMessage(encrypt(secretKey.getEncoded(),a));
+                secureRandom.nextBytes(encrypt_iv);
+                byte[] mac = hmac(secretKey.getEncoded(),sendMessage.toString().getBytes("UTF-8"));
+                byte[] sendMessageBytes = sendMessage.toString().getBytes("UTF-8");
+                ByteBuffer byteBuffer1 = ByteBuffer.allocate(1 + mac.length + sendMessageBytes.length);
+                byteBuffer1.put((byte) mac.length);
+                byteBuffer1.put(mac);
+                byteBuffer1.put(sendMessageBytes);
+                byte[] messageWithMac = byteBuffer1.array();
+                byte[] messageWithMacEncrypted = encrypt(secretKey.getEncoded(),messageWithMac);
+                ByteBuffer byteBuffer2 = ByteBuffer.allocate(1+ encrypt_iv.length + messageWithMacEncrypted.length);
+                byteBuffer2.put((byte) encrypt_iv.length);
+                byteBuffer2.put(encrypt_iv);
+                byteBuffer2.put(messageWithMacEncrypted);
+                byte[] finalMessage = byteBuffer2.array();
+                broadcastMessage(finalMessage);
             } catch (Exception e) {
                 e.printStackTrace();
             }
@@ -178,14 +183,37 @@ public class MainActivity extends AppCompatActivity {
         private String lastMessage = "";
 
         public void run() {
-            byte[] lmessage = new byte[MAX_UDP_DATAGRAM_LEN];
-            DatagramPacket packet = new DatagramPacket(lmessage, lmessage.length);
+            byte[] tempBytes = new byte[MAX_UDP_DATAGRAM_LEN];
+            DatagramPacket packet = new DatagramPacket(tempBytes, tempBytes.length);
             try {
                 DatagramSocket socket = new DatagramSocket(UDP_SERVER_PORT,InetAddress.getByName("0.0.0.0"));
                 socket.setBroadcast(true);
                 while (bKeepRunning) {
                     socket.receive(packet);
-                    lastMessage = new String(decrypt(secretKey.getEncoded(),lmessage),"UTF-8");
+                    byte[] lmessage = new byte[packet.getLength()];
+                    System.arraycopy(tempBytes, 0, lmessage, 0, lmessage.length);
+                    ByteBuffer byteBuffer1 = ByteBuffer.wrap(lmessage);
+                    int ivLength = (byteBuffer1.get());
+                    if (ivLength != 16) {
+                        throw new IllegalArgumentException("invalid iv length");
+                    }
+                    byte[] iv = new byte[ivLength];
+                    byteBuffer1.get(iv);
+                    byte[] messageWithMac = new byte[byteBuffer1.remaining()];
+                    byteBuffer1.get(messageWithMac);
+                    ByteBuffer byteBuffer2 = ByteBuffer.wrap(decrypt(secretKey.getEncoded(),iv,messageWithMac));
+                    int macLength = (byteBuffer2.get());
+                    if (macLength != 32) {
+                        throw new IllegalArgumentException("invalid mac length");
+                    }
+                    byte[] mac = new byte[macLength];
+                    byteBuffer2.get(mac);
+                    byte[] message = new byte[byteBuffer2.remaining()];
+                    byteBuffer2.get(message);
+                    if(!veryfyMac(secretKey.getEncoded(),message,mac)) {
+                        throw new IllegalArgumentException("invalid mac");
+                    }
+                    lastMessage = new String(message, "UTF-8");
                     runOnUiThread(updateTextMessages);
                 }
                 socket.close();
@@ -218,7 +246,6 @@ public class MainActivity extends AppCompatActivity {
             socket.setBroadcast(true);
             InetAddress IPAddress = getBroadcastAddress();
             DatagramPacket sendPacket = new DatagramPacket(sendData, sendData.length, IPAddress, UDP_SERVER_PORT);
-            Log.i("BroadcastLog", IPAddress.getHostAddress());
             socket.send(sendPacket);
         } catch (Exception e) {
             e.printStackTrace();
@@ -235,7 +262,7 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private String getDeviceId() {
-        String deviceId = "";
+        String deviceId;
         final TelephonyManager mTelephony = (TelephonyManager) getSystemService(Context.TELEPHONY_SERVICE);
         if (checkSelfPermission(Manifest.permission.READ_PHONE_STATE) != PackageManager.PERMISSION_GRANTED) {
             ActivityCompat.requestPermissions(thisActivity, new String[]{Manifest.permission.READ_PHONE_STATE}, 0);
@@ -249,18 +276,32 @@ public class MainActivity extends AppCompatActivity {
         return deviceId;
     }
 
-    private static byte[] encrypt(byte[] raw, byte[] clear) throws Exception {
-        SecretKeySpec skeySpec = new SecretKeySpec(raw, "AES");
-        Cipher cipher = Cipher.getInstance("AES");
-        cipher.init(Cipher.ENCRYPT_MODE, skeySpec);
-        return cipher.doFinal(clear);
+    private static byte[] encrypt(byte[] key, byte[] message) throws Exception {
+        SecretKeySpec skeySpec = new SecretKeySpec(key, "AES");
+        Cipher cipher = Cipher.getInstance("AES/CBC/PKCS5PADDING");
+        cipher.init(Cipher.ENCRYPT_MODE, skeySpec, new IvParameterSpec(encrypt_iv));
+        return cipher.doFinal(message);
     }
 
-    private static byte[] decrypt(byte[] raw, byte[] encrypted) throws Exception {
-        SecretKeySpec skeySpec = new SecretKeySpec(raw, "AES");
-        Cipher cipher = Cipher.getInstance("AES");
-        cipher.init(Cipher.DECRYPT_MODE, skeySpec);
-        return cipher.doFinal(encrypted);
+    private static byte[] decrypt(byte[] key, byte[] iv, byte[] message) throws Exception {
+        SecretKeySpec skeySpec = new SecretKeySpec(key, "AES");
+        Cipher cipher = Cipher.getInstance("AES/CBC/PKCS5PADDING");
+        cipher.init(Cipher.DECRYPT_MODE, skeySpec, new IvParameterSpec(iv));
+        return cipher.doFinal(message);
+    }
+
+    private static byte[] hmac(byte[] key, byte[] message) throws Exception{
+        SecretKeySpec skeySpec = new SecretKeySpec(key, "HmacSHA256");
+        Mac sha256_HMAC = Mac.getInstance("HmacSHA256");
+        sha256_HMAC.init(skeySpec);
+        return sha256_HMAC.doFinal(message);
+    }
+
+    private static boolean veryfyMac(byte[] key, byte[] message, byte[] mac) throws Exception{
+        SecretKeySpec skeySpec = new SecretKeySpec(key, "HmacSHA256");
+        Mac sha256_HMAC = Mac.getInstance("HmacSHA256");
+        sha256_HMAC.init(skeySpec);
+        return (Arrays.equals(sha256_HMAC.doFinal(message),mac));
     }
 
     InetAddress getBroadcastAddress() throws IOException {
@@ -272,4 +313,5 @@ public class MainActivity extends AppCompatActivity {
             quads[k] = (byte) ((broadcast >> k * 8) & 0xFF);
         return InetAddress.getByAddress(quads);
     }
+
 }
