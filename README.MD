@@ -36,7 +36,7 @@ The two functions are combined to create the packet to broadcast as demonstrated
 The construction of the packet is done in two parts and the first one has 1 byte for the mac size followed by the mac and followed by the message. The second part is constituted by 1 byte for the IV length followed by the IV followed by the first part.
 
 ### Screenshots
-![Start Menu](./start.png)
-![Create Group](./creategroup.png)
-![Network Monitor Menu](./networkmonitor.png)
-![Share Group](./sharegroup.png)
+![Start Menu](./start.png =250x)
+![Create Group](./creategroup.png =250x)
+![Network Monitor Menu](./networkmonitor.png =250x)
+![Share Group](./sharegroup.png =250x)
